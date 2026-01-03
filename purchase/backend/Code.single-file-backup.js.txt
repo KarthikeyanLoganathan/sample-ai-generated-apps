@@ -1,0 +1,2534 @@
+// The content of this file to be copied into Code.gs of Google Apps Script project of Google Sheet
+/**
+ * Google Apps Script for Purchase App Backend
+ * This script sets up Google Sheets as a backend for the Flutter Purchase App
+ * and provides REST API endpoints for data synchronization
+ */
+
+// Observations:
+//  - A date value in Google Sheets is represented as a JavaScript Date object
+
+// Configuration
+const SPREADSHEET_ID =
+    PropertiesService.getScriptProperties().getProperty("SPREADSHEET_ID");
+const CONFIG_SHEET_NAME = "config";
+
+// Table indices for delta sync (must match Flutter SyncConfig)
+const TABLE_NAMES_TO_INDICES = Object.freeze({
+    manufacturers: 1,
+    vendors: 2,
+    materials: 3,
+    manufacturer_materials: 4,
+    vendor_price_lists: 5,
+    purchase_orders: 6,
+    purchase_order_items: 7,
+    purchase_order_payments: 8,
+});
+const TABLE_INDICES_TO_NAMES = (function () {
+    let result = {};
+    for (const [name, index] of Object.entries(TABLE_NAMES_TO_INDICES)) {
+        result[String(index)] = name;
+    }
+    return Object.freeze(result);
+})();
+
+const EPOCH_TIME_LOWEST_MILLISECONDS = -8640000000000000; // Earliest date in JavaScript
+const EPOCH_TIME_1900_01_01_00_00_00_UTC_MILLISECONDS = -2208988800000; // 1900-01-01T00:00:00Z
+//const EPOCH_TIME_LOWEST = new Date(EPOCH_TIME_LOWEST_MILLISECONDS);
+
+// Change modes
+const CHANGE_MODE_INSERT = "I";
+const CHANGE_MODE_UPDATE = "U";
+const CHANGE_MODE_DELETE = "D";
+
+const CHANGE_MODE_TEMPORARY_FIELD = "___change___mode___";
+const UPDATED_AT_TEMPORARY_FIELD = "___updated___at___";
+
+const DATA_TYPES = Object.freeze({
+    UUID: "dc134eea-29d5-4af6-9bcc-e45076770d9a",//different different values to be used for comparison
+    TABLE_IDENTIFIFER_INDEX: 1, //different different values to be used for comparison
+    ID: 2,//different different values to be used for comparison
+    INTEGER: 3,//different different values to be used for comparison
+    AMOUNT: 4.5,//different different values to be used for comparison
+    QUANTITY: 5.5,//different different values to be used for comparison
+    DOUBLE: 6.5,//different different values to be used for comparison
+    NAME: "NAME",//different different values to be used for comparison
+    STRING: "String",//different different values to be used for comparison
+    CURRENCY: "Currency",//different different values to be used for comparison
+    PERCENT: 0.1,//different different values to be used for comparison
+    DESCRIPTION: "Description",//different different values to be used for comparison
+    TIME_STAMP: new Date(),//different different values to be used for comparison
+    BOOLEAN: true,//different different values to be used for comparison
+    CHANGE_MODE: "I",//different different values to be used for comparison
+});
+
+const TABLE_METADATA = Object.freeze({
+    manufacturers: Object.freeze({
+        name: "manufacturers",
+        columns: Object.freeze({
+            uuid: DATA_TYPES.UUID,
+            id: DATA_TYPES.ID,
+            name: DATA_TYPES.NAME,
+            description: DATA_TYPES.DESCRIPTION,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {},
+    }),
+    vendors: Object.freeze({
+        name: "vendors",
+        columns: Object.freeze({
+            uuid: DATA_TYPES.UUID,
+            id: DATA_TYPES.ID,
+            name: DATA_TYPES.NAME,
+            description: DATA_TYPES.DESCRIPTION,
+            address: DATA_TYPES.STRING,
+            geo_location: DATA_TYPES.STRING,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {},
+    }),
+    materials: Object.freeze({
+        name: "materials",
+        columns: Object.freeze({
+            uuid: DATA_TYPES.UUID,
+            id: DATA_TYPES.ID,
+            name: DATA_TYPES.NAME,
+            description: DATA_TYPES.DESCRIPTION,
+            unit_of_measure: DATA_TYPES.STRING,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {},
+    }),
+    manufacturer_materials: Object.freeze({
+        name: "manufacturer_materials",
+        columns: Object.freeze({
+            uuid: DATA_TYPES.UUID,
+            manufacturer_id: DATA_TYPES.UUID,
+            material_id: DATA_TYPES.UUID,
+            model: DATA_TYPES.STRING,
+            selling_lot_size: DATA_TYPES.QUANTITY,
+            max_retail_price: DATA_TYPES.AMOUNT,
+            currency: DATA_TYPES.CURRENCY,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {
+            manufacturer_name: '=ARRAYFORMULA({"manufacturer_name"; IF(B2:B="", "", IFERROR(VLOOKUP(B2:B, manufacturers!A:C, 3, FALSE), "Not Found"))})',
+            material_name:
+                '=ARRAYFORMULA({"material_name"; IF(C2:C="", "", IFERROR(VLOOKUP(C2:C, materials!A:C, 3, FALSE), "Not Found"))})',
+            unit_of_measure:
+                '=ARRAYFORMULA({"unit_of_measure"; IF(C2:C="", "", IFERROR(VLOOKUP(C2:C, materials!A:E, 5, FALSE), "Not Found"))})',
+        },
+    }),
+    vendor_price_lists: Object.freeze({
+        name: "vendor_price_lists",
+        columns: Object.freeze({
+            uuid: DATA_TYPES.UUID,
+            manufacturer_material_id: DATA_TYPES.UUID,
+            vendor_id: DATA_TYPES.UUID,
+            rate: DATA_TYPES.AMOUNT,
+            rate_before_tax: DATA_TYPES.AMOUNT,
+            currency: DATA_TYPES.CURRENCY,
+            tax_percent: DATA_TYPES.PERCENT,
+            tax_amount: DATA_TYPES.DOUBLE,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: Object.freeze({
+            vendor_name:
+                '=ARRAYFORMULA({"vendor_name"; IF(C2:C="", "", IFERROR(VLOOKUP(C2:C, vendors!A:C, 3, FALSE), "Not Found"))})',
+            manufacturer_name: '=ARRAYFORMULA({"manufacturer_name"; IF(B2:B="", "", IFERROR(VLOOKUP(B2:B, manufacturer_materials!A:K, 9, FALSE), "Not Found"))})',
+            material_name: '=ARRAYFORMULA({"material_name"; IF(B2:B="", "", IFERROR(VLOOKUP(B2:B, manufacturer_materials!A:K, 10, FALSE), "Not Found"))})',
+            model: '=ARRAYFORMULA({"model"; IF(B2:B="", "", IFERROR(VLOOKUP(B2:B, manufacturer_materials!A:K, 4, FALSE), "Not Found"))})',
+            unit_of_measure: '=ARRAYFORMULA({"unit_of_measure"; IF(B2:B="", "", IFERROR(VLOOKUP(B2:B, manufacturer_materials!A:K, 11, FALSE), "Not Found"))})',
+        }),
+    }),
+    purchase_orders: Object.freeze({
+        name: "purchase_orders",
+        columns: Object.freeze({
+            uuid: DATA_TYPES.UUID,
+            id: DATA_TYPES.ID,
+            vendor_id: DATA_TYPES.UUID,
+            date: DATA_TYPES.TIME_STAMP,
+            base_price: DATA_TYPES.AMOUNT,
+            tax_amount: DATA_TYPES.AMOUNT,
+            total_amount: DATA_TYPES.AMOUNT,
+            currency: DATA_TYPES.CURRENCY,
+            order_date: DATA_TYPES.TIME_STAMP,
+            expected_delivery_date: DATA_TYPES.TIME_STAMP,
+            amount_paid: DATA_TYPES.AMOUNT,
+            amount_balance: DATA_TYPES.AMOUNT,
+            completed: DATA_TYPES.BOOLEAN,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {
+            vendor_name:
+                '=ARRAYFORMULA({"vendor_name"; IF(C2:C="", "", IFERROR(VLOOKUP(C2:C, vendors!A:C, 3, FALSE), "Not Found"))})',
+        },
+    }),
+    purchase_order_items: Object.freeze({
+        name: "purchase_order_items",
+        columns: Object.freeze({
+            uuid: DATA_TYPES.UUID,
+            purchase_order_id: DATA_TYPES.UUID,
+            manufacturer_material_id: DATA_TYPES.UUID,
+            material_id: DATA_TYPES.UUID,
+            model: DATA_TYPES.STRING,
+            quantity: DATA_TYPES.QUANTITY,
+            rate: DATA_TYPES.AMOUNT,
+            rate_before_tax: DATA_TYPES.AMOUNT,
+            base_price: DATA_TYPES.AMOUNT,
+            tax_percent: DATA_TYPES.PERCENT,
+            tax_amount: DATA_TYPES.AMOUNT,
+            total_amount: DATA_TYPES.AMOUNT,
+            currency: DATA_TYPES.CURRENCY,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {
+            material_name:
+                '=ARRAYFORMULA({"material_name"; IF(D2:D="", "", IFERROR(VLOOKUP(D2:D, materials!A:C, 3, FALSE), "Not Found"))})',
+        },
+    }),
+    purchase_order_payments: Object.freeze({
+        name: "purchase_order_payments",
+        columns: Object.freeze({
+            uuid: DATA_TYPES.UUID,
+            purchase_order_uuid: DATA_TYPES.UUID,
+            date: DATA_TYPES.TIME_STAMP,
+            amount: DATA_TYPES.AMOUNT,
+            currency: DATA_TYPES.CURRENCY,
+            upi_ref_number: DATA_TYPES.STRING,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {},
+    }),
+    change_log: Object.freeze({
+        name: "change_log",
+        columns: Object.freeze({
+            id: DATA_TYPES.UUID,
+            table_index: DATA_TYPES.TABLE_IDENTIFIFER_INDEX,
+            key: DATA_TYPES.UUID,
+            change_mode: DATA_TYPES.CHANGE_MODE,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {},
+    }),
+    condensed_change_log: Object.freeze({
+        name: "condensed_change_log",
+        columns: Object.freeze({
+            id: DATA_TYPES.UUID,
+            table_index: DATA_TYPES.TABLE_IDENTIFIFER_INDEX,
+            key: DATA_TYPES.UUID,
+            change_mode: DATA_TYPES.CHANGE_MODE,
+            updated_at: DATA_TYPES.TIME_STAMP,
+        }),
+        lookupColumns: {},
+    })
+});
+
+const TABLE_META_INFO = (function () {
+    let result = {};
+    for (const [tableName, def] of Object.entries(TABLE_METADATA)) {
+        const columns = Object.keys(def.columns);
+        let colIndices = {};
+        columns.forEach((colName, index) => {
+            colIndices[colName] = index;
+        });
+        result[tableName] = Object.freeze({
+            columns: Object.freeze(colIndices),
+            columnCount: columns.length,
+        });
+    }
+    return Object.freeze(result);
+})();
+
+const DATA_MAINTENANCE_SHEETS = Object.freeze({
+    MANUFACTURER_MATERIAL_MODELS: Object.freeze({
+        NAMES: "MaintainManufacturerMaterialModels",
+        DATA: "MaintainManufacturerMaterialModelData"
+    })
+});
+
+const DEFAULT_CURRENCY_NAMED_RANGE = "DEFAULT_CURRENCY";
+
+/**
+ * Setup function to create all required sheets matching SQLite database structure
+ * Run this function once to initialize the Google Sheet
+ */
+function onOpen() {
+    const ui = SpreadsheetApp.getUi();
+    ui.createMenu("Purchase App")
+        .addItem("Fill UUID", "fillUUID")
+        .addSeparator()
+        .addItem("Export Current Sheet to CSV", "exportCurrentSheetToCSV")
+        .addItem("Cleanup Current Sheet", "cleanupCurrentSheet")
+        .addSeparator()
+        .addItem("Initialize Change Log from Data Sheets", "initializeChangeLog")
+        .addItem("Write Condensed Change Log", "writeCondensedChangeLogForAllData")
+        .addSeparator()
+        .addItem("Setup / Update Schema", "setup")
+        .addItem("Setup Maintain Manufacturer Material Models - Input Sheet", "setupManufacturerMaterialModelsInputSheet")
+        .addItem("Setup Maintain Manufacturer Material Model Data - Input Sheet", "setupManufacturerMaterialModelDataInputSheet")
+        .addToUi();
+}
+
+function UUID() {
+    return Utilities.getUuid();
+}
+
+/**
+ * Fill the current active cell with a UUID value
+ */
+function fillUUID() {
+    const sheet = SpreadsheetApp.getActiveSheet();
+    const cell = sheet.getActiveCell();
+
+    if (!cell) {
+        SpreadsheetApp.getUi().alert("No cell selected!");
+        return;
+    }
+
+    cell.setValue(UUID());
+    SpreadsheetApp.getUi().alert("UUID filled successfully!");
+}
+
+/**
+ * Helper to identify if a column should be treated as a date
+ */
+function isDateColumn(tableName, columnName) {
+    return TABLE_METADATA?.[tableName]?.columns?.[columnName] === DATA_TYPES.TIME_STAMP;
+}
+
+/**
+ * Setup a single table/sheet
+ * @param {string} tableName - Name of the table to setup
+ */
+function setupTable(tableName, doLogging = true) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const def = TABLE_METADATA[tableName];
+
+    if (!def) {
+        throw new Error(`Table "${tableName}" not found in TABLE_METADATA`);
+    }
+
+    const columns = Object.keys(def.columns);
+    let sheet = ss.getSheetByName(tableName);
+
+    if (sheet) {
+        if (doLogging) {
+            Logger.log(`Sheet "${tableName}" already exists. Checking columns...`);
+        }
+
+        // Delete redundant columns if there are more than needed
+        const currentMaxColumn = sheet.getMaxColumns();
+        const lookups = Object.keys(def?.lookupColumns || {});
+        const requiredColumns = columns.length + lookups.length;
+
+        if (currentMaxColumn > requiredColumns) {
+            const columnsToDelete = currentMaxColumn - requiredColumns;
+            sheet.deleteColumns(requiredColumns + 1, columnsToDelete);
+            if (doLogging) {
+                Logger.log(
+                    `Deleted ${columnsToDelete} redundant columns from "${tableName}"`
+                );
+            }
+        }
+
+        // Update header row to ensure it matches the schema
+        sheet.getRange(1, 1, 1, columns.length).setValues([columns]);
+
+        // Format header
+        sheet
+            .getRange(1, 1, 1, columns.length)
+            .setBackground("#4285F4")
+            .setFontColor("#FFFFFF")
+            .setFontWeight("bold")
+            .setHorizontalAlignment("center");
+
+        // Apply lookup formulas if defined
+        applyLookupFormulas(sheet, tableName);
+
+        // Apply numeric formatting to existing data
+        applyNumericFormatting(sheet, tableName);
+
+        // Optimize column widths
+        autoResizeSheetColumns(sheet);
+
+        if (doLogging) {
+            Logger.log(`Sheet "${tableName}" updated successfully`);
+        }
+    } else {
+        // Create new sheet
+        sheet = ss.insertSheet(tableName);
+
+        // Set header row
+        sheet.getRange(1, 1, 1, columns.length).setValues([columns]);
+
+        // Format header
+        sheet
+            .getRange(1, 1, 1, columns.length)
+            .setBackground("#4285F4")
+            .setFontColor("#FFFFFF")
+            .setFontWeight("bold")
+            .setHorizontalAlignment("center");
+
+        // Freeze header row
+        sheet.setFrozenRows(1);
+
+        // Delete extra rows (Google Sheets creates 1000 rows by default)
+        // Keep only header row + 1 empty data row
+        const maxRows = sheet.getMaxRows();
+        if (maxRows > 2) {
+            sheet.deleteRows(3, maxRows - 2);
+        }
+
+        // Delete extra columns beyond what we need
+        const maxColumns = sheet.getMaxColumns();
+        const lookups = Object.keys(def?.lookupColumns || {});
+        const totalInitialCols = columns.length + lookups.length;
+
+        if (maxColumns > totalInitialCols) {
+            sheet.deleteColumns(
+                totalInitialCols + 1,
+                maxColumns - totalInitialCols
+            );
+        }
+
+        // Apply lookup formulas if defined
+        applyLookupFormulas(sheet, tableName);
+
+        // Apply numeric formatting (even on empty sheets for when data is added)
+        applyNumericFormatting(sheet, tableName);
+
+        // Optimize column widths
+        autoResizeSheetColumns(sheet);
+
+        if (doLogging) {
+            Logger.log(`Sheet "${tableName}" created successfully`);
+        }
+    }
+}
+
+function setup() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // Create config sheet first
+    let configSheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+    if (!configSheet) {
+        configSheet = ss.insertSheet(CONFIG_SHEET_NAME);
+        configSheet
+            .getRange(1, 1, 1, 2)
+            .setValues([["name", "value", "description"]]);
+
+        // Format header
+        configSheet
+            .getRange(1, 1, 1, 2)
+            .setBackground("#FF6B6B")
+            .setFontColor("#FFFFFF")
+            .setFontWeight("bold")
+            .setHorizontalAlignment("center");
+
+        // Add default APP_CODE - USER MUST CHANGE THIS!
+        configSheet.appendRow(["APP_CODE", "CHANGE_ME_" + new Date().getTime()]);
+
+        configSheet.setFrozenRows(1);
+        configSheet.autoResizeColumn(1);
+        configSheet.autoResizeColumn(2);
+
+        Logger.log("Config sheet created. IMPORTANT: Change APP_CODE value!");
+    }
+
+    // Setup all tables
+    for (const tableName of Object.keys(TABLE_METADATA)) {
+        setupTable(tableName, true);
+    }
+
+    // Delete default "Sheet1" if it exists and is empty
+    const sheet1 = ss.getSheetByName("Sheet1");
+    if (sheet1 && sheet1.getLastRow() === 0) {
+        ss.deleteSheet(sheet1);
+    }
+
+    Logger.log("Setup completed successfully!");
+    Logger.log("⚠️  IMPORTANT: Go to config sheet and change APP_CODE value!");
+    return "Setup completed! REMEMBER: Change APP_CODE in config sheet!";
+}
+
+/**
+ * Get configuration value by name
+ */
+function getConfigValue(name) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const configSheet = ss.getSheetByName(CONFIG_SHEET_NAME);
+
+    if (!configSheet) {
+        throw new Error("Config sheet not found. Run setup() first.");
+    }
+
+    const data = configSheet.getDataRange().getValues();
+    for (let i = 1; i < data.length; i++) {
+        if (data[i][0] === name) {
+            return data[i][1];
+        }
+    }
+
+    return null;
+}
+
+/**
+ * Apply number formatting and alignment to numeric columns
+ */
+function applyNumericFormatting(sheet, tableName) {
+    const tableMetadata = TABLE_METADATA?.[tableName];
+    const columns = Object.keys(tableMetadata?.columns || {});
+    if (columns.length === 0) return;
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) return; // No data rows to format
+
+    for (let i = 0; i < columns.length; i++) {
+        const columnName = columns[i];
+        const columnType = tableMetadata?.columns?.[columnName];
+        const colIndex = i + 1;
+        // Apply to data rows (row 2 onwards)
+        const range = sheet.getRange(2, colIndex, lastRow - 1, 1);
+        if (columnType === DATA_TYPES.ID || columnType === DATA_TYPES.INTEGER) {
+            range.setNumberFormat("0");
+            range.setHorizontalAlignment("right");
+        } else if (columnType === DATA_TYPES.QUANTITY) {
+            range.setNumberFormat("0.00");
+            range.setHorizontalAlignment("right");
+        } else if (columnType === DATA_TYPES.AMOUNT ||
+            columnType === DATA_TYPES.DOUBLE) {
+            range.setNumberFormat("#,##0.00");
+            range.setHorizontalAlignment("right");
+        } else if (columnType === DATA_TYPES.PERCENT) {
+            range.setNumberFormat("0.00");
+            range.setHorizontalAlignment("right");
+        } else if (columnType === DATA_TYPES.BOOLEAN) {
+            range.setNumberFormat("0");
+            range.setHorizontalAlignment("center");
+        } else if (columnType === DATA_TYPES.TIME_STAMP) {
+            range.setNumberFormat("dd/mm/yyyy hh:mm:ss");
+        }
+    }
+}
+
+/**
+ * Helper function to automatically resize all columns in a sheet
+ * Includes header rows in calculation and ensures a minimum width
+ */
+function autoResizeSheetColumns(sheet) {
+    const lastColumn = sheet.getLastColumn();
+    if (lastColumn === 0) return;
+
+    // Force a flush to ensure all pending changes (like header text updates) are applied before resizing
+    SpreadsheetApp.flush();
+
+    const headers = sheet.getRange(1, 1, 1, lastColumn).getValues()[0];
+
+    for (let i = 1; i <= lastColumn; i++) {
+        sheet.autoResizeColumn(i);
+
+        // Google Sheets autoResizeColumn sometimes ignores the header width when there's no data.
+        // We'll calculate a minimum width based on the header text length.
+        const headerText = String(headers[i - 1] || "");
+        // Approximate 10 pixels per character for bold text, plus some padding
+        const estimatedHeaderWidth = headerText.length * 10 + 20;
+
+        const currentWidth = sheet.getColumnWidth(i);
+        const finalWidth = Math.max(currentWidth, estimatedHeaderWidth, 100);
+
+        sheet.setColumnWidth(i, finalWidth);
+    }
+}
+
+/**
+ * Apply informational lookup formulas to a sheet
+ */
+function applyLookupFormulas(sheet, tableName) {
+    const lookupColumns = TABLE_METADATA?.[tableName]?.lookupColumns;
+    if (!lookupColumns) return;
+
+    const baseColumns = Object.keys(TABLE_METADATA?.[tableName]?.columns || {});
+
+    const lookups = Object.keys(lookupColumns);
+
+    lookups.forEach((lookup, index) => {
+        const colIndex = baseColumns.length + index + 1;
+        const headerRange = sheet.getRange(1, colIndex);
+
+        // Set header name and formula in the first row (ARRAYFORMULA handles the rest)
+        headerRange.setFormula(lookupColumns[lookup]);
+
+        // Format header
+        headerRange
+            .setBackground("#673AB7") // Different color for lookup columns
+            .setFontColor("#FFFFFF")
+            .setFontWeight("bold")
+            .setHorizontalAlignment("center");
+
+        // Format data rows to indicate they are read-only (using a red font color)
+        const dataRange = sheet.getRange(2, colIndex, sheet.getMaxRows() - 1, 1);
+        dataRange.setFontColor("#B71C1C"); // Material Dark Red
+    });
+
+    // Clean up any stray columns beyond lookups
+    const maxCols = sheet.getMaxColumns();
+    const totalNeeded = baseColumns.length + lookups.length;
+    if (maxCols > totalNeeded) {
+        // Note: We don't delete if pickers follow, setup() handles that
+    }
+}
+
+/**
+ * Export current sheet to CSV format with ISO 8601 dates
+ */
+function exportCurrentSheetToCSV() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getActiveSheet();
+    const sheetName = sheet.getName();
+    const data = sheet.getDataRange().getValues();
+
+    if (data.length < 1) {
+        SpreadsheetApp.getUi().alert("The sheet is empty.");
+        return;
+    }
+    const tableColumns = TABLE_METADATA?.[sheetName]?.columns;
+
+    const baseColumns = tableColumns ? Object.keys(tableColumns) : data[0];
+    const colIndices = baseColumns
+        .map((col) => data[0].indexOf(col))
+        .filter((idx) => idx !== -1);
+
+    let csvContent = "";
+
+    for (let i = 0; i < data.length; i++) {
+        const row = data[i];
+        // Only include base columns in CSV
+        const csvRow = colIndices.map((index) => {
+            let value = row[index];
+
+            // Format dates specifically
+            if (value instanceof Date) {
+                value = value.toISOString();
+            } else if (
+                typeof value === "string" &&
+                isDateColumn(sheetName, baseColumns[index])
+            ) {
+                // Double check if it's a date string that needs normalization
+                try {
+                    const d = new Date(value);
+                    if (!isNaN(d.getTime())) {
+                        value = d.toISOString();
+                    }
+                } catch (e) { }
+            }
+
+            // Escape quotes and wrap in quotes if necessary
+            let stringValue =
+                value === null || value === undefined ? "" : String(value);
+            if (
+                stringValue.includes(",") ||
+                stringValue.includes('"') ||
+                stringValue.includes("\n")
+            ) {
+                stringValue = '"' + stringValue.replace(/"/g, '""') + '"';
+            }
+            return stringValue;
+        });
+
+        csvContent += csvRow.join(",") + "\r\n";
+    }
+
+    const filename = sheetName + ".csv";
+    showDownloadDialog(csvContent, filename);
+
+    /**
+     * Helper to show a download dialog for the generated CSV
+     */
+    function showDownloadDialog(content, filename) {
+        const htmlContent = `
+      <html>
+        <body>
+          <p>Your CSV file is ready for download.</p>
+          <a id="downloadLink" href="#" download="${filename}">Click here to download if it doesn't start automatically</a>
+          <script>
+            const content = ${JSON.stringify(content)};
+            const blob = new Blob([content], {type: 'text/csv'});
+            const url = URL.createObjectURL(blob);
+            const link = document.getElementById('downloadLink');
+            link.href = url;
+            link.click();
+            // Close dialog after a delay
+            setTimeout(() => { google.script.host.close(); }, 3000);
+          </script>
+        </body>
+      </html>
+    `;
+
+        const html = HtmlService.createHtmlOutput(htmlContent)
+            .setWidth(400)
+            .setHeight(150);
+
+        SpreadsheetApp.getUi().showModalDialog(html, "Downloading CSV...");
+    }
+}
+
+/**
+ * Validate secret code from request
+ */
+function validateSecretCode(providedCode) {
+    const storedCode = getConfigValue("APP_CODE");
+
+    if (!storedCode || storedCode === "CHANGE_ME_" + new Date().getTime()) {
+        throw new Error("APP_CODE not configured in config sheet");
+    }
+
+    if (providedCode !== storedCode) {
+        throw new Error("Invalid secret code");
+    }
+
+    return true;
+}
+
+/**
+ * Unified POST endpoint handler for all operations
+ * Secret code is sent in request body for better security (not in URL)
+ * Supports both 'pull' (download) and 'push' (upload) operations
+ */
+function doPost(e) {
+    try {
+        const params = JSON.parse(e.postData.contents);
+        const secretCode = params.secret;
+        const operation = params.operation; // 'delta_pull' or 'delta_push'
+        const table = params.table;
+
+        // Validate secret code
+        validateSecretCode(secretCode);
+
+        if (operation === "login") {
+            // Login/credential validation - just return success if secret is valid
+            return ContentService.createTextOutput(
+                JSON.stringify({
+                    success: true,
+                    message: "Credentials validated successfully"
+                })
+            ).setMimeType(ContentService.MimeType.JSON);
+        } else if (operation === "delta_pull") {
+            // Delta sync: Pull changes from server using change_log with pagination
+            const sinceEpochTimeMilliseconds = getEpochTimeMilliseconds(params?.since, EPOCH_TIME_LOWEST_MILLISECONDS);
+            const offset = params.offset != null ? parseInt(params.offset, 10) : 0;
+            const limit = params.limit != null ? parseInt(params.limit, 10) : 200;
+
+            // If offset is 0, consolidate change log
+            if (offset === 0) {
+                Logger.log('Consolidating change log into condensed_change_log');
+                writeCondensedChangeLog(sinceEpochTimeMilliseconds);
+            }
+
+            // Read condensed change log with pagination
+            const { log, totalRecords } = readCondensedChangeLog(offset, limit);
+
+            // Fetch actual records for insert/update operations
+            const tableRecords = fetchTableRecordsForChanges(log);
+
+            return ContentService.createTextOutput(
+                JSON.stringify({
+                    success: true,
+                    log: log,
+                    totalRecords: totalRecords,
+                    tableRecords: tableRecords
+                })
+            ).setMimeType(ContentService.MimeType.JSON);
+        } else if (operation === "delta_push") {
+            // Delta sync: Push changes to server using change_log with batch operations
+            const log = params.log;
+            const tableRecords = params.tableRecords;
+
+            if (!log) {
+                return ContentService.createTextOutput(
+                    JSON.stringify({ error: "Missing log parameter" })
+                ).setMimeType(ContentService.MimeType.JSON);
+            }
+
+            const result = applyDeltaChangesBatch(log, tableRecords);
+
+            return ContentService.createTextOutput(
+                JSON.stringify({ success: true, processed: result })
+            ).setMimeType(ContentService.MimeType.JSON);
+        } else {
+            return ContentService.createTextOutput(
+                JSON.stringify({
+                    error:
+                        'Invalid operation. Use "login", "delta_pull", or "delta_push"',
+                })
+            ).setMimeType(ContentService.MimeType.JSON);
+        }
+    } catch (error) {
+        return ContentService.createTextOutput(
+            JSON.stringify({ error: error.toString() })
+        ).setMimeType(ContentService.MimeType.JSON);
+    }
+}
+
+/**
+ * GET endpoint - redirects to inform users to use POST
+ * Google Apps Script web apps don't support custom HTTP headers,
+ * so we use POST for all operations to keep secret in body
+ */
+function doGet(e) {
+    return ContentService.createTextOutput(
+        JSON.stringify({
+            error:
+                "This API only accepts POST requests. Please use POST with secret in request body.",
+        })
+    ).setMimeType(ContentService.MimeType.JSON);
+}
+
+/**
+ * Insert or update records in a sheet
+ * Uses uuid as primary key for upsert logic
+ */
+function upsertRecords(tableName, records) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(tableName);
+
+    if (!sheet) {
+        throw new Error(`Sheet "${tableName}" not found`);
+    }
+
+    const headers = TABLE_METADATA?.[tableName]?.columns ? Object.keys(TABLE_METADATA?.[tableName]?.columns) : [];
+
+    if (headers.length === 0) {
+        throw new Error(`Schema for "${tableName}" not found`);
+    }
+
+    const sheetHeaders = sheet
+        .getRange(1, 1, 1, sheet.getLastColumn())
+        .getValues()[0];
+    const uuidIndex = sheetHeaders.indexOf("uuid");
+    const data = sheet.getDataRange().getValues();
+
+    if (uuidIndex === -1) {
+        throw new Error("uuid column not found");
+    }
+
+    let updatedCount = 0;
+
+    for (const record of records) {
+        const uuid = record.uuid;
+        let rowIndex = -1;
+
+        // Find existing row by uuid
+        for (let i = 1; i < data.length; i++) {
+            if (data[i][uuidIndex] === uuid) {
+                rowIndex = i + 1; // +1 because sheet rows are 1-indexed
+                break;
+            }
+        }
+
+        // Prepare row data with Date object conversion
+        const rowData = headers.map((header) => {
+            let val = record[header] || "";
+            if (val && isDateColumn(tableName, header)) {
+                try {
+                    // Attempt to parse ISO string to Date object
+                    const date = new Date(val);
+                    if (!isNaN(date.getTime())) {
+                        return date;
+                    }
+                } catch (e) {
+                    // If parsing fails, fall back to original value
+                }
+            }
+            return val;
+        });
+
+        if (rowIndex > 0) {
+            // Update existing row (only base columns)
+            const range = sheet.getRange(rowIndex, 1, 1, headers.length);
+            range.setValues([rowData]);
+        } else {
+            // Append new row
+            sheet.appendRow(rowData);
+        }
+
+        updatedCount++;
+    }
+
+    // Optimize column widths after updates
+    autoResizeSheetColumns(sheet);
+
+    return updatedCount;
+}
+
+/**
+ * Delete records from a sheet
+ * @param {string} tableName - Name of the table
+ * @param {Array} deletions - Array of {uuid, deleted_at} objects
+ * @returns {number} Number of records deleted
+ */
+function deleteRecords(tableName, deletions) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(tableName);
+
+    if (!sheet) {
+        throw new Error(`Sheet "${tableName}" not found`);
+    }
+
+    const data = sheet.getDataRange().getValues();
+    const headers = data[0];
+    const uuidIndex = headers.indexOf("uuid");
+
+    if (uuidIndex === -1) {
+        throw new Error("uuid column not found");
+    }
+
+    let deletedCount = 0;
+
+    // Process each deletion
+    for (const deletion of deletions) {
+        const uuid = deletion.uuid;
+        let rowIndex = -1;
+
+        // Find existing row by uuid
+        for (let i = 1; i < data.length; i++) {
+            if (data[i][uuidIndex] === uuid) {
+                rowIndex = i + 1; // +1 because sheet rows are 1-indexed
+                break;
+            }
+        }
+
+        if (rowIndex > 0) {
+            // Delete the row
+            sheet.deleteRows(rowIndex, 1);
+            deletedCount++;
+
+            // Update data array to reflect deletion
+            data.splice(rowIndex - 1, 1);
+        }
+    }
+
+    return deletedCount;
+}
+
+/**
+ * Get the deployed web app URL
+ */
+function getWebAppUrl() {
+    return ScriptApp.getService().getUrl();
+}
+
+/**
+ * Cleanup the current active sheet by clearing all data rows (keeps header)
+ * Wrapper function for menu item that calls cleanupSheet()
+ */
+function cleanupCurrentSheet() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getActiveSheet();
+    const sheetName = sheet.getName();
+
+    const rowsCleared = cleanupSheet(sheetName);
+
+    const message = rowsCleared > 0
+        ? `Cleared ${rowsCleared} rows from ${sheetName}`
+        : `${sheetName} is already empty`;
+
+    SpreadsheetApp.getUi().alert(message);
+    return message;
+}
+
+/**
+ * Cleanup a single sheet by clearing all data rows (keeps header)
+ * @param {string} sheetName - Name of the sheet to cleanup
+ * @returns {number} Number of rows cleared (0 if sheet not found or already empty)
+ */
+function cleanupSheet(sheetName) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(sheetName);
+
+    if (!sheet) {
+        Logger.log(`WARNING: Sheet "${sheetName}" not found`);
+        return 0;
+    }
+
+    const lastRow = sheet.getLastRow();
+
+    // If there are data rows (more than just the header)
+    if (lastRow > 1) {
+        const numRowsToClear = lastRow - 1;
+        const numCols = sheet.getLastColumn();
+
+        // Clear the content of data rows (keep the rows but remove content)
+        sheet.getRange(2, 1, numRowsToClear, numCols).clearContent();
+
+        Logger.log(`Cleared ${numRowsToClear} rows from ${sheetName}`);
+
+        // Delete all rows after the header row
+        if (lastRow > 2) {
+            sheet.deleteRows(3, lastRow - 2);
+            Logger.log(`Deleted ${lastRow - 1} rows from ${sheetName}`);
+        }
+
+        return numRowsToClear;
+    } else {
+        Logger.log(`${sheetName} is already empty`);
+        return 0;
+    }
+}
+
+/**
+ * Cleanup function to clear all data from data sheets
+ * Keeps the config sheet and its APP_CODE intact
+ * Only clears data rows (keeps headers)
+ */
+function cleanup() {
+    const dataSheets = Object.keys(TABLE_METADATA);
+
+    let clearedCount = 0;
+    let totalRowsCleared = 0;
+
+    for (const sheetName of dataSheets) {
+        const rowsCleared = cleanupSheet(sheetName);
+        if (rowsCleared > 0) {
+            clearedCount++;
+            totalRowsCleared += rowsCleared;
+        }
+    }
+
+    Logger.log(
+        `Cleanup completed! Cleared ${totalRowsCleared} total rows from ${clearedCount} sheets.`
+    );
+    Logger.log("Config sheet preserved.");
+
+    return `Cleanup completed! Cleared ${totalRowsCleared} total rows from ${clearedCount} data sheets. Config sheet preserved.`;
+}
+
+/**
+ * Initialize change_log sheet with all existing records
+ * Clears existing change_log and creates INSERT entries for all records in all tables
+ * @returns {string} Status message with count of records initialized
+ */
+function initializeChangeLog() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const changeLogSheet = ss.getSheetByName("change_log");
+
+    if (!changeLogSheet) {
+        throw new Error("change_log sheet not found. Run setup() first.");
+    }
+
+    // Clear all data except header row
+    cleanupSheet("change_log");
+
+    const dataTable = [];
+
+    // Iterate through all tables defined in TABLE_NAMES_TO_INDICES
+    for (const sheetName in TABLE_NAMES_TO_INDICES) {
+        const sheet = ss.getSheetByName(sheetName);
+        if (!sheet) {
+            Logger.log(`WARNING: Sheet "${sheetName}" not found, skipping`);
+            continue;
+        }
+
+        const tableIndex = TABLE_NAMES_TO_INDICES[sheetName];
+        const uuidColumnIndex = TABLE_META_INFO[sheetName].columns["uuid"];
+        const updatedAtColumnIndex = TABLE_META_INFO[sheetName].columns["updated_at"];
+
+        const sheetLastRow = sheet.getLastRow();
+        if (sheetLastRow < 2) {
+            // No data rows
+            Logger.log(`Sheet "${sheetName}" has no data rows, skipping`);
+            continue;
+        }
+
+        // Read UUID column values (skip header row)
+        const uuidValues = sheet.getRange(2, uuidColumnIndex + 1, sheetLastRow - 1, 1).getValues();
+        // Read updated_at column values (skip header row)
+        const updatedAtValues = sheet.getRange(2, updatedAtColumnIndex + 1, sheetLastRow - 1, 1).getValues();
+
+        // Prepare data for change_log
+        for (let i = 0; i < uuidValues.length; i++) {
+            const key = uuidValues[i][0];
+            const updatedAt = updatedAtValues[i][0];
+            if (key && typeof key === "string" && key.trim() !== "") {
+                const id = UUID();
+                dataTable.push([id, tableIndex, key, CHANGE_MODE_INSERT, updatedAt]);
+            }
+        }
+
+        Logger.log(`Processed ${uuidValues.length} records from "${sheetName}"`);
+    }
+
+    // Insert all records into change_log
+    if (dataTable.length > 0) {
+        changeLogSheet.getRange(2, 1, dataTable.length, 5).setValues(dataTable);
+    }
+
+    setupTable("change_log", false);
+
+    Logger.log(`Initialized change_log with ${dataTable.length} total records`);
+    return `Initialized change_log with ${dataTable.length} total records`;
+}
+
+/**
+ * Get condensed change log that eliminates redundant changes
+ * Keeps only the first INSERT/UPDATE for each key and removes entries that were later deleted
+ * @param {number} sinceEpochTimeMilliseconds - Timestamp filter in milliseconds (optional)
+* @returns {array} Array of condensed change records
+ */
+function prepareCondensedChangeLogFromChangeLog(sinceEpochTimeMilliseconds) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName("change_log");
+    const changeLogMetadata = TABLE_META_INFO?.["change_log"];
+
+    if (!sheet) {
+        return [];
+    }
+
+    const data = sheet.getDataRange().getValues();
+
+    // Find column indices
+    const colIndex = {
+        id: changeLogMetadata.columns.id,
+        table_index: changeLogMetadata.columns.table_index,
+        key: changeLogMetadata.columns.key,
+        change_mode: changeLogMetadata.columns.change_mode,
+        updated_at: changeLogMetadata.columns.updated_at,
+    };
+
+    const result = [];
+    const tableChangeHistory = {};
+
+    // Skip header row (index 0)
+    for (let i = 1; i < data.length; i++) {
+        const row = data[i];
+        const updated_at_milliseconds = getEpochTimeMilliseconds(
+            row[colIndex.updated_at],
+            EPOCH_TIME_1900_01_01_00_00_00_UTC_MILLISECONDS);
+        const rec = {
+            id: row[colIndex.id],
+            table_index: row[colIndex.table_index],
+            key: row[colIndex.key],
+            change_mode: row[colIndex.change_mode],
+            updated_at: new Date(updated_at_milliseconds),
+            updated_at_milliseconds: updated_at_milliseconds,
+        };
+
+        // Filter by timestamp if provided
+        if (rec.updated_at_milliseconds <= sinceEpochTimeMilliseconds) {
+            continue;
+        }
+
+        const changeHistoryTableMemberName = String(rec.table_index);
+
+        // Initialize table history if it doesn't exist
+        if (!tableChangeHistory[changeHistoryTableMemberName]) {
+            tableChangeHistory[changeHistoryTableMemberName] = {};
+        }
+
+        const recordUuid = rec.key;
+
+        if (rec.change_mode === CHANGE_MODE_INSERT || rec.change_mode === CHANGE_MODE_UPDATE) {
+            if (!tableChangeHistory[changeHistoryTableMemberName][recordUuid]) {
+                tableChangeHistory[changeHistoryTableMemberName][recordUuid] = rec.change_mode;
+                result.push(rec);
+            }
+        } else if (rec.change_mode === CHANGE_MODE_DELETE) {
+            if (tableChangeHistory[changeHistoryTableMemberName][recordUuid]) {
+                delete tableChangeHistory[changeHistoryTableMemberName][recordUuid];
+
+                // Delete rec from result searching by table_index and key
+                for (let j = result.length - 1; j >= 0; j--) {
+                    if (result[j].table_index === rec.table_index && result[j].key === rec.key) {
+                        result.splice(j, 1);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    // Sort by table_index (ascending), then by updated_at (ascending)
+    result.sort((a, b) => {
+        if (a.table_index !== b.table_index) {
+            return a.table_index - b.table_index;
+        }
+        const aTime = a.updated_at_milliseconds;
+        const bTime = b.updated_at_milliseconds;
+        return aTime - bTime;
+    });
+
+    return result;
+}
+
+/**
+ * Write condensed change log to condensed_change_log sheet
+ * Creates the sheet if it doesn't exist and writes all condensed records
+ * @param {number} sinceEpochTimeMilliseconds - Timestamp filter in milliseconds (optional)
+* @returns {string} Status message with count of records written
+ */
+function writeCondensedChangeLog(sinceEpochTimeMilliseconds) {
+    // Clear existing data (except header)
+    cleanupSheet("condensed_change_log");
+
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+
+    // Get condensed change log data
+    const condensedData = prepareCondensedChangeLogFromChangeLog(sinceEpochTimeMilliseconds);
+
+    // Get or create condensed_change_log sheet
+    let condensedSheet = ss.getSheetByName("condensed_change_log");
+    if (!condensedSheet) {
+        Logger.log("condensed_change_log sheet does not exist");
+    }
+
+    // Write condensed data
+    if (condensedData.length > 0) {
+        const dataTable = condensedData.map(rec => [
+            rec.id,
+            rec.table_index,
+            rec.key,
+            rec.change_mode,
+            rec.updated_at
+        ]);
+
+        condensedSheet.getRange(2, 1, dataTable.length, 5).setValues(dataTable);
+    }
+
+    setupTable("condensed_change_log", false);
+
+    Logger.log(`Wrote ${condensedData.length} records to condensed_change_log`);
+    return `Wrote ${condensedData.length} records to condensed_change_log`;
+}
+
+function writeCondensedChangeLogForAllData() {
+    return writeCondensedChangeLog(EPOCH_TIME_LOWEST_MILLISECONDS);
+}
+
+/**
+ * Read condensed change log with pagination
+ * @param {number} offset - Starting row index (0-based, relative to data rows)
+ * @param {number} limit - Number of rows to read
+ * @return {object} {log: array of change records, totalRecords: total count}
+ */
+function readCondensedChangeLog(offset, limit) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName('condensed_change_log');
+    const tableMetadata = TABLE_META_INFO?.['condensed_change_log'];
+
+    if (!sheet) {
+        Logger.log('condensed_change_log sheet not found');
+        return { log: [], totalRecords: 0 };
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow <= 1) {
+        // Only header or empty sheet
+        return { log: [], totalRecords: 0 };
+    }
+
+    const totalRecords = lastRow - 1; // Exclude header row
+
+    // Calculate actual range to read (offset is 0-based for data rows)
+    const startRow = 2 + offset; // Row 1 is header, row 2 is first data row
+    const endRow = Math.min(startRow + limit - 1, lastRow);
+    const numRows = endRow - startRow + 1;
+
+    if (startRow > lastRow || numRows <= 0) {
+        // Offset is beyond available data
+        return { log: [], totalRecords: totalRecords };
+    }
+
+    // Read the data range
+    const data = sheet.getRange(startRow, 1, numRows, tableMetadata.columnCount).getValues();
+
+    // Convert to array of objects
+    const log = data.map(row => ({
+        id: row[tableMetadata.columns.id],
+        table_index: row[tableMetadata.columns.table_index],
+        key: row[tableMetadata.columns.key],
+        change_mode: row[tableMetadata.columns.change_mode],
+        updated_at: row[tableMetadata.columns.updated_at]
+    }));
+
+    Logger.log(`Read ${log.length} records from condensed_change_log (offset: ${offset}, limit: ${limit}, total: ${totalRecords})`);
+
+    return {
+        log: log,
+        totalRecords: totalRecords
+    };
+}
+
+/**
+ * Log a change to the change_log sheet for delta sync
+ * @param {string} tableName - Name of the table
+ * @param {string} key - UUID of the record
+ * @param {string} changeMode - 'I', 'U', or 'D'
+ */
+function logChange(tableName, key, changeMode, updatedAt) {
+    try {
+        const ss = SpreadsheetApp.getActiveSpreadsheet();
+        const changeLogSheet = ss.getSheetByName("change_log");
+
+        if (!changeLogSheet) {
+            Logger.log(
+                "WARNING: change_log sheet not found, skipping change logging"
+            );
+            return;
+        }
+
+        const tableIndex = TABLE_NAMES_TO_INDICES[tableName];
+        if (tableIndex === undefined) {
+            Logger.log(`WARNING: No table index for ${tableName}`);
+            return;
+        }
+
+        const now = new Date();
+        const nextId = UUID()
+
+        changeLogSheet.appendRow([nextId, tableIndex, key, changeMode, updatedAt || now]);
+    } catch (error) {
+        Logger.log(`ERROR logging change: ${error.toString()}`);
+    }
+}
+
+/**
+ * Apply delta changes from client to server with batch processing
+ * Processes deletes first, then inserts/updates in batches per table
+ * @param {array} log - Array of change log entries
+ * @param {object} tableRecords - Map of table names to record maps
+ * @returns {number} Number of changes processed
+ */
+function applyDeltaChangesBatch(log, tableRecords) {
+    let processed = 0;
+
+    // Group changes by table and operation
+    const changesByTable = {};
+
+    for (const change of log) {
+        try {
+            const tableIndex = change.table_index;
+            const key = change.key;
+            const changeMode = change.change_mode;
+            const updatedAt = new Date(getEpochTimeMilliseconds(change.updated_at, null));
+
+            // Find table name from index
+            const tableName = TABLE_INDICES_TO_NAMES?.[String(tableIndex)];
+            if (!tableName) {
+                Logger.log(`Unknown table index: ${tableIndex}`);
+                continue;
+            }
+
+            // Initialize table structure
+            if (!changesByTable[tableName]) {
+                changesByTable[tableName] = {
+                    deletes: [],
+                    upserts: []
+                };
+            }
+
+            if (changeMode === CHANGE_MODE_DELETE) {
+                changesByTable[tableName].deletes.push({ uuid: key, deleted_at: updatedAt });
+            } else {
+                // For insert/update, get record from tableRecords
+                const record = tableRecords?.[tableName]?.[key];
+                if (record) {
+                    record[CHANGE_MODE_TEMPORARY_FIELD] = changeMode; // Store change mode temporarily if needed
+                    record[UPDATED_AT_TEMPORARY_FIELD] = updatedAt;
+                    record.updated_at = new Date(getEpochTimeMilliseconds(record.updated_at, updatedAt)); // Ensure updated_at is Date object
+                    changesByTable[tableName].upserts.push(record);
+                }
+            }
+        } catch (error) {
+            Logger.log(`ERROR grouping change: ${error.toString()}`);
+        }
+    }
+
+    // Process each table: deletes first, then upserts
+    for (const tableName in changesByTable) {
+        const changes = changesByTable[tableName];
+
+        try {
+            // Process deletes
+            if (changes.deletes.length > 0) {
+                Logger.log(`Deleting ${changes.deletes.length} records from ${tableName}`);
+                const deleted = deleteRecords(tableName, changes.deletes);
+                processed += deleted;
+
+                // Log changes
+                for (const deletion of changes.deletes) {
+                    logChange(tableName, deletion.uuid, CHANGE_MODE_DELETE, deletion.deleted_at);
+                }
+            }
+
+            // Process upserts
+            if (changes.upserts.length > 0) {
+                Logger.log(`Upserting ${changes.upserts.length} records to ${tableName}`);
+                const upserted = upsertRecords(tableName, changes.upserts);
+                processed += upserted;
+
+                // Log changes
+                for (const record of changes.upserts) {
+                    const changeMode = record[CHANGE_MODE_TEMPORARY_FIELD];
+                    logChange(tableName, record.uuid, changeMode, record[UPDATED_AT_TEMPORARY_FIELD]);
+                }
+            }
+        } catch (error) {
+            Logger.log(`ERROR processing table ${tableName}: ${error.toString()}`);
+        }
+    }
+
+    return processed;
+}
+
+/**
+ * Fetch table records efficiently for a list of changes
+ * Groups changes by table and fetches all records in batch
+ * @param {array} log - Array of change log entries
+ * @returns {object} Object with table names as keys and record maps as values
+ */
+function fetchTableRecordsForChanges(log) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const tableRecords = {};
+
+    // Group changes by table_index
+    const changesByTable = {};
+    for (const change of log) {
+        const tableIndex = change.table_index;
+        const changeMode = change.change_mode;
+        const key = change.key;
+
+        // Only fetch records for insert/update operations
+        if (changeMode === CHANGE_MODE_INSERT || changeMode === CHANGE_MODE_UPDATE) {
+            if (!changesByTable[tableIndex]) {
+                changesByTable[tableIndex] = [];
+            }
+            changesByTable[tableIndex].push(key);
+        }
+    }
+
+    // Fetch records for each table
+    for (const tableIndexStr in changesByTable) {
+        const tableIndex = parseInt(tableIndexStr, 10);
+        const tableName = TABLE_INDICES_TO_NAMES[String(tableIndex)];
+
+        if (!tableName) {
+            Logger.log(`WARNING: Unknown table index ${tableIndex}`);
+            continue;
+        }
+
+        const keys = changesByTable[tableIndex];
+        if (keys.length === 0) continue;
+
+        const sheet = ss.getSheetByName(tableName);
+        if (!sheet) {
+            Logger.log(`WARNING: Sheet "${tableName}" not found`);
+            continue;
+        }
+
+        const tableMetadata = TABLE_METADATA?.[tableName];
+        if (!tableMetadata) {
+            Logger.log(`WARNING: No metadata for table "${tableName}"`);
+            continue;
+        }
+
+        // Fetch all records for this table efficiently
+        const records = batchGetRecordsByUuids(sheet, tableName, tableMetadata, keys);
+
+        if (Object.keys(records).length > 0) {
+            tableRecords[tableName] = records;
+        }
+    }
+
+    return tableRecords;
+}
+
+/**
+ * Batch fetch records by UUIDs for performance
+ * @param {Sheet} sheet - Google Sheet object
+ * @param {string} tableName - Name of the table
+ * @param {object} tableMetadata - Table metadata from TABLE_METADATA
+ * @param {array} uuids - Array of UUIDs to fetch
+ * @returns {object} Map of UUID to record objects
+ */
+function batchGetRecordsByUuids(sheet, tableName, tableMetadata, uuids) {
+    const records = {};
+    const uuidColIndex = TABLE_META_INFO?.[tableName]?.columns?.uuid;
+
+    if (uuidColIndex === undefined) {
+        return records;
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow < 2) {
+        return records; // No data rows
+    }
+
+    // Read all data at once for efficiency
+    const numCols = TABLE_META_INFO?.[tableName]?.columnCount;
+    const allData = sheet.getRange(2, 1, lastRow - 1, numCols).getValues();
+    const columnNames = Object.keys(tableMetadata.columns);
+
+    // Create a set for faster lookup
+    const uuidSet = new Set(uuids);
+
+    // Find matching rows
+    for (let i = 0; i < allData.length; i++) {
+        const row = allData[i];
+        const uuid = row[uuidColIndex];
+
+        if (uuidSet.has(uuid)) {
+            const record = {};
+            for (const colName of columnNames) {
+                const colIndex = TABLE_META_INFO?.[tableName]?.columns?.[colName];
+                let val = row[colIndex];
+
+                // Convert Date objects to ISO strings
+                if (val instanceof Date) {
+                    val = val.toISOString();
+                }
+
+                record[colName] = val;
+            }
+            records[uuid] = record;
+        }
+    }
+
+    return records;
+}
+
+function getEpochTimeMilliseconds(input, defaultValue) {
+    let result = input;
+    if (!result) {
+        result = defaultValue ? defaultValue : new Date();
+    }
+    if (typeof result === "string") {
+        result = new Date(result);
+    }
+    if (result instanceof Date) {
+        result = result.getTime();
+    }
+    return result;
+}
+
+function readManufacturers() {
+    const result = {
+        list: [],
+        uuidMap: {},
+        nameMap: {},
+        count: 0
+    };
+    // Get materials data
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TABLE_METADATA.manufacturers.name);
+    const columns = TABLE_META_INFO?.manufacturers?.columns;
+    const sheetData = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < sheetData.length; i++) {
+        //uuid	id	name	description	updated_at
+        const rec = {
+            uuid: sheetData[i][columns?.uuid],
+            id: sheetData[i][columns?.id],
+            name: sheetData[i][columns?.name],
+            description: sheetData[i][columns?.description],
+            updated_at: sheetData[i][columns?.updated_at],
+        };
+        result.list.push(rec);
+        result.uuidMap[rec.uuid] = rec;
+        result.nameMap[rec.name] = rec;
+        result.count++;
+    }
+    result.list.sort((a, b) => {
+        if (a.name < b.name) return -1;
+        if (a.name > b.name) return 1;
+        return 0;
+    });
+    return result;
+}
+
+function readVendors() {
+    const result = {
+        list: [],
+        uuidMap: {},
+        nameMap: {},
+        count: 0
+    };
+    // Get materials data
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TABLE_METADATA.vendors.name);
+    const columns = TABLE_META_INFO?.vendors?.columns;
+    const sheetData = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < sheetData.length; i++) {
+        //uuid	id	name	description	address	geo_location	updated_at
+        const rec = {
+            uuid: sheetData[i][columns?.uuid],
+            id: sheetData[i][columns?.id],
+            name: sheetData[i][columns?.name],
+            description: sheetData[i][columns?.description],
+            address: sheetData[i][columns?.address],
+            geo_location: sheetData[i][columns?.geo_location],
+            updated_at: sheetData[i][columns?.updated_at],
+        };
+        result.list.push(rec);
+        result.uuidMap[rec.uuid] = rec;
+        result.nameMap[rec.name] = rec;
+        result.count++;
+    }
+    result.list.sort((a, b) => {
+        if (a.name < b.name) return -1;
+        if (a.name > b.name) return 1;
+        return 0;
+    });
+    return result;
+}
+
+function readMaterials() {
+    const result = {
+        list: [],
+        uuidMap: {},
+        nameMap: {},
+        count: 0
+    };
+    // Get materials data
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TABLE_METADATA.materials.name);
+    const columns = TABLE_META_INFO?.materials?.columns;
+    const sheetData = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < sheetData.length; i++) {
+        //uuid	id	name	description	unit_of_measure	updated_at
+        const rec = {
+            uuid: sheetData[i][columns?.uuid],
+            id: sheetData[i][columns?.id],
+            name: sheetData[i][columns?.name],
+            description: sheetData[i][columns?.description],
+            unit_of_measure: sheetData[i][columns?.unit_of_measure],
+            updated_at: sheetData[i][columns?.updated_at]
+        };
+        result.list.push(rec);
+        result.uuidMap[rec.uuid] = rec;
+        result.nameMap[rec.name] = rec;
+        result.count++;
+    }
+    result.list.sort((a, b) => {
+        if (a.name < b.name) return -1;
+        if (a.name > b.name) return 1;
+        return 0;
+    });
+    return result;
+}
+
+function readManufacturerMaterials(manufacturersMap, materialsMap, manufacturerId) {
+    const result = {
+        list: [],
+        uuidMap: {},
+        map: {},
+        count: 0
+    };
+    // Get materials data
+    const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName(TABLE_METADATA.manufacturer_materials.name);
+    const columns = TABLE_META_INFO?.manufacturer_materials?.columns;
+    const sheetData = sheet.getDataRange().getValues();
+
+    for (let i = 1; i < sheetData.length; i++) {
+        //uuid	manufacturer_id	material_id	model	
+        // selling_lot_size	max_retail_price	currency	updated_at	
+        // manufacturer_name	material_name	unit_of_measure
+        const rec = {
+            uuid: sheetData[i][columns?.uuid],
+            manufacturer_id: sheetData[i][columns?.manufacturer_id],
+            material_id: sheetData[i][columns?.material_id],
+            model: sheetData[i][columns?.model],
+            selling_lot_size: sheetData[i][columns?.selling_lot_size],
+            max_retail_price: sheetData[i][columns?.max_retail_price],
+            currency: sheetData[i][columns?.currency],
+            updated_at: sheetData[i][columns?.updated_at],
+            manufacturer: null,
+            material: null
+            // manufacturer_name: sheetData[i][columns?.manufacturer_name],
+            // material_name: sheetData[i][columns?.material_name],
+            // unit_of_measure: sheetData[i][columns?.unit_of_measure]
+        };
+        rec.manufacturer = manufacturersMap[rec.manufacturer_id] || null;
+        rec.material = materialsMap[rec.material_id] || null;
+        if (manufacturerId && rec.manufacturer_id !== manufacturerId) {
+            continue;
+        }
+        result.list.push(rec);
+        result.uuidMap[rec.uuid] = rec;
+        let manuMap = result.map[rec.manufacturer_id];
+        if (!manuMap) {
+            manuMap = result.map[rec.manufacturer_id] = {};
+        }
+        let matMap = manuMap[rec.material_id];
+        if (!matMap) {
+            matMap = manuMap[rec.material_id] = {};
+        }
+        let modelMap = matMap[rec.model];
+        if (!modelMap) {
+            modelMap = matMap[rec.model] = rec;
+        }
+        result.count++;
+    }
+    result.list.sort((a, b) => {
+        if (a.manufacturer?.name < b.manufacturer?.name) return -1;
+        if (a.manufacturer?.name > b.manufacturer?.name) return 1;
+        if (a.material?.name < b.material?.name) return -1;
+        if (a.material?.name > b.material?.name) return 1;
+        if (a.model < b.model) return -1;
+        if (a.model > b.model) return 1;
+        return 0;
+    });
+
+    return result;
+}
+
+/**
+ * Setup Manufacturer Material Models Input Sheet
+ * Creates a utility sheet for maintaining manufacturer materials in a matrix format
+ */
+function setupManufacturerMaterialModelsInputSheet() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheetName = DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.NAMES;
+
+    // Delete existing sheet if it exists
+    let sheet = ss.getSheetByName(sheetName);
+    if (sheet) {
+        sheet.getDataRange().clearContent().clearFormat().clearDataValidations();
+    } else {
+        // Create new sheet
+        sheet = ss.insertSheet(sheetName);
+    }
+
+    // Set up title row (merged cells)
+    sheet.getRange(1, 1, 1, 5).merge();
+    sheet.getRange(1, 1)
+        .setValue("Maintain Manufacturer Materials Models")
+        .setFontSize(12)
+        .setFontWeight("bold")
+        .setHorizontalAlignment("center")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    sheet.getRange(1, 6).setValue("Create Buttons manually if you regenerated this sheet")
+
+    // Row 2: Manufacturer label and dropdown
+    sheet.getRange(2, 1)
+        .setValue("Manufacturer")
+        .setFontSize(10)
+        .setFontWeight("bold");
+
+    // Set up data validation for manufacturer dropdown
+    const manufacturersSheet = ss.getSheetByName(TABLE_METADATA.manufacturers.name);
+    if (manufacturersSheet) {
+        const lastRow = manufacturersSheet.getLastRow();
+        if (lastRow > 1) {
+            const nameColumnIndex = TABLE_META_INFO?.manufacturers?.columns?.name;
+            if (nameColumnIndex !== undefined) {
+                const range = manufacturersSheet.getRange(2, nameColumnIndex + 1, lastRow - 1, 1);
+                const rule = SpreadsheetApp.newDataValidation()
+                    .requireValueInRange(range, true)
+                    .setAllowInvalid(false)
+                    .build();
+                sheet.getRange(2, 2).setDataValidation(rule);
+            }
+        }
+    }
+
+    // Row 3: Create clickable checkbox buttons
+    // Clear any existing buttons in row 3
+    sheet.getRange(3, 1, 1, 11).clearContent().clearFormat();
+
+    // Create "Prepare" button using checkbox (cell 3,1)
+    sheet.getRange(3, 1)
+        .setValue("⚡ Prepare Data")
+        .setFontWeight("bold")
+        .setFontSize(10)
+        .setBackground("#34A853")
+        .setFontColor("#FFFFFF")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#2D7D3E", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+    // Insert checkbox in cell 3,2 for Prepare
+    const prepareCheckbox = sheet.getRange(3, 2);
+    prepareCheckbox
+        .insertCheckboxes()
+        .setBackground("#34A853")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#2D7D3E", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    prepareCheckbox.setNote("Check this box to prepare data");
+
+    // Create "Save" button using checkbox (cell 3,3)
+    sheet.getRange(3, 3)
+        .setValue("💾 Save Data")
+        .setFontWeight("bold")
+        .setFontSize(10)
+        .setBackground("#EA4335")
+        .setFontColor("#FFFFFF")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#C5341F", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+    // Insert checkbox in cell 3,4 for Save
+    const saveCheckbox = sheet.getRange(3, 4);
+    saveCheckbox
+        .insertCheckboxes()
+        .setBackground("#EA4335")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#C5341F", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    saveCheckbox.setNote("Check this box to save changes");
+
+    // Create "Clear" button using checkbox (cell 3,5)
+    sheet.getRange(3, 5)
+        .setValue("🗑️ Clear Data")
+        .setFontWeight("bold")
+        .setFontSize(10)
+        .setBackground("#FBBC04")
+        .setFontColor("#000000")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#F9AB00", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+    // Insert checkbox in cell 3,6 for Clear
+    const clearCheckbox = sheet.getRange(3, 6);
+    clearCheckbox.insertCheckboxes();
+    clearCheckbox
+        .setBackground("#FBBC04")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#F9AB00", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    clearCheckbox.setNote("Check this box to clear all data below row 4");
+
+    // Set row height for better button appearance
+    sheet.setRowHeight(3, 35);
+
+    // Row 4: Column headers
+    sheet.getRange(4, 1)
+        .setValue("Material")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    // Row 4: Column headers
+    sheet.getRange(4, 2)
+        .setValue("Unit")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    for (let i = 1; i <= 10; i++) {
+        sheet.getRange(4, i + 2)
+            .setValue(`Model ${i}`)
+            .setFontSize(10)
+            .setFontWeight("bold")
+            .setBackground("#4285F4")
+            .setFontColor("#FFFFFF");
+    }
+
+    // Freeze rows and set column widths
+    sheet.setFrozenRows(4);
+    sheet.setColumnWidth(1, 200);
+    for (let i = 2; i <= 11; i++) {
+        sheet.setColumnWidth(i, 120);
+    }
+
+    Logger.log("Manufacturer Material Input Sheet created successfully");
+    SpreadsheetApp.getUi().alert("Sheet created! Select a manufacturer and check the '⚡ Prepare Data' checkbox.");
+
+    return "Manufacturer Material Input Sheet created";
+}
+
+/**
+ * Prepare manufacturer material models input data
+ * Populates the matrix with existing materials and models
+ */
+function prepareManufacturerMaterialModels() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.NAMES);
+
+    if (!sheet) {
+        throw new Error(`${DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.NAMES} sheet not found. Run setupManufacturerMaterialModelsInputSheet() first.`);
+    }
+
+    // Clear existing data (rows 5 onwards)
+    clearManufacturerMaterialModels(false);
+
+    // Get selected manufacturer
+    const manufacturerName = sheet.getRange(2, 2).getValue();
+    if (!manufacturerName) {
+        SpreadsheetApp.getUi().alert("Please select a manufacturer first!");
+        return;
+    }
+
+    const manufacturers = readManufacturers();
+    const manufacturerId = manufacturers.nameMap[manufacturerName]?.uuid;
+    if (!manufacturerId) {
+        SpreadsheetApp.getUi().alert("Manufacturer not found!");
+        return;
+    }
+
+    const materials = readMaterials();
+
+    const manufacturerMaterials = readManufacturerMaterials(
+        manufacturers.uuidMap,
+        materials.uuidMap,
+        manufacturerId
+    );
+
+    // Populate the matrix
+    for (let i = 0; i < materials.list.length; i++) {
+        const m = materials.list[i];
+        const rowIndex = i + 5; // Start from row 5
+        sheet.getRange(rowIndex, 1).setValue(m.name);
+        sheet.getRange(rowIndex, 2).setValue(m.unit_of_measure);
+
+        let c = 2; // Start from column 3 for models
+        for (let j = 0; j < manufacturerMaterials.list.length; j++) {
+            const mm = manufacturerMaterials.list[j];
+            if (mm.material_id === m.uuid
+                && mm.manufacturer_id === manufacturerId
+                && c <= 10) {
+                c++;
+                sheet.getRange(rowIndex, c).setValue(mm.model);
+            }
+        }
+    }
+
+    Logger.log("Manufacturer material input data prepared successfully");
+    SpreadsheetApp.getUi().alert("Data prepared! Edit models as needed, then check the '💾 Save Data' checkbox.");
+}
+
+/**
+ * Maintain manufacturer material models
+ * Processes the matrix and updates the manufacturer_materials sheet
+ */
+function maintainManufacturerMaterialModels() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const inputSheet = ss.getSheetByName(DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.NAMES);
+    const mmSheet = ss.getSheetByName(TABLE_METADATA.manufacturer_materials.name);
+
+    if (!inputSheet) {
+        throw new Error(`${DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.NAMES} sheet not found.`);
+    }
+
+    // Get selected manufacturer
+    const manufacturerName = inputSheet.getRange(2, 2).getValue();
+    if (!manufacturerName) {
+        SpreadsheetApp.getUi().alert("Please select a manufacturer first!");
+        return;
+    }
+
+    const manufacturers = readManufacturers();
+    const manufacturerId = manufacturers.nameMap[manufacturerName]?.uuid;
+    if (!manufacturerId) {
+        SpreadsheetApp.getUi().alert("Manufacturer not found!");
+        return;
+    }
+
+    const materials = readMaterials();
+
+    const manufacturerMaterials = readManufacturerMaterials(
+        manufacturers.uuidMap,
+        materials.uuidMap,
+        manufacturerId
+    );
+
+    // Process sheet data
+    const newEntries = [];
+    const deleteEntries = [];
+    const currentEntriesMap = {};
+
+    const lastRow = inputSheet.getLastRow();
+    for (let r = 5; r <= lastRow; r++) {
+        const materialName = inputSheet.getRange(r, 1).getValue();
+        if (!materialName) continue;
+
+        let c = 2; // Start from column 3 for models
+        for (let j = 1; j <= 10; j++) {
+            c++;
+            const modelValue = inputSheet.getRange(r, c).getValue();
+            if (modelValue) {
+                const rec = {
+                    manufacturer_name: manufacturerName,
+                    manufacturer_id: manufacturerId,
+                    material_name: materialName,
+                    material_id: materials.nameMap[materialName]?.uuid,
+                    model: modelValue,
+                    uuid: null,
+                    newEntry: false
+                };
+
+                // Check if this model already exists
+                let manuMap = manufacturerMaterials.map[manufacturerId];
+                if (!manuMap) {
+                    manuMap = manufacturerMaterials.map[manufacturerId] = {};
+                }
+                let matMap = manuMap[rec.material_id];
+                if (!matMap) {
+                    matMap = manuMap[rec.material_id] = {};
+                }
+                if (matMap[rec.model]) {
+                    rec.uuid = matMap[rec.model].uuid;
+                    currentEntriesMap[rec.uuid] = rec;
+                } else {
+                    matMap[rec.model] = rec;
+                    rec.uuid = UUID();
+                    rec.newEntry = true;
+                    currentEntriesMap[rec.uuid] = rec;
+                    newEntries.push(rec);
+                }
+            }
+        }
+    }
+
+    // Find records to delete
+    for (const man_id in manufacturerMaterials.map) {
+        const manuMap = manufacturerMaterials.map[man_id];
+        for (const mat_id in manuMap) {
+            const matMap = manuMap[mat_id];
+            for (const model in matMap) {
+                const uuid = matMap[model].uuid;
+                if (!currentEntriesMap[uuid]) {
+                    deleteEntries.push({
+                        uuid: uuid,
+                        manufacturer_id: man_id,
+                        material_id: mat_id,
+                        model: model
+                    });
+                }
+            }
+        }
+    }
+
+    const currentTime = new Date();
+    const metaInfo = TABLE_META_INFO.manufacturer_materials;
+    // Delete records from manufacturer_materials sheet
+    if (deleteEntries.length > 0) {
+        const deleteUuids = deleteEntries.map(rec => rec.uuid);
+        const sheetData = mmSheet.getDataRange().getValues();
+
+        // Find rows to delete (in reverse order to avoid index shifts)
+        const rowsToDelete = [];
+        for (let i = sheetData.length - 1; i >= 1; i--) {
+            const uuid = sheetData[i][metaInfo.columns.uuid];
+            if (deleteUuids.includes(uuid)) {
+                rowsToDelete.push(i + 1); // +1 for 1-based indexing
+                logChange(TABLE_METADATA.manufacturer_materials.name, uuid, CHANGE_MODE_DELETE, currentTime);
+            }
+        }
+
+        // Delete rows
+        for (const rowIndex of rowsToDelete) {
+            mmSheet.deleteRows(rowIndex, 1);
+        }
+
+        Logger.log(`Deleted ${rowsToDelete.length} records`);
+    }
+
+    // Insert new records
+    if (newEntries.length > 0) {
+        const insertData = newEntries.map(rec => {
+            const row = new Array(metaInfo?.columnCount).fill("");
+            row[metaInfo.columns.uuid] = rec.uuid;
+            row[metaInfo.columns.manufacturer_id] = rec.manufacturer_id;
+            row[metaInfo.columns.material_id] = rec.material_id;
+            row[metaInfo.columns.model] = rec.model;
+            row[metaInfo.columns.updated_at] = currentTime;
+            return row;
+        });
+
+        const startRow = mmSheet.getLastRow() + 1;
+        mmSheet.getRange(startRow, 1, insertData.length, metaInfo?.columnCount)
+            .setValues(insertData);
+
+        Logger.log(`Inserted ${insertData.length} new records`);
+        // Log changes
+        for (const record of insertData) {
+            logChange(TABLE_METADATA.manufacturer_materials.name, record.uuid, CHANGE_MODE_INSERT, currentTime);
+        }
+    }
+
+    // Apply formatting and resize
+    setupTable(TABLE_METADATA.manufacturer_materials.name, false);
+
+    SpreadsheetApp.getUi().alert(
+        `Maintenance complete!\nInserted: ${newEntries.length}\nDeleted: ${deleteEntries.length}`
+    );
+
+    return `Inserted: ${newEntries.length}, Deleted: ${deleteEntries.length}`;
+}
+
+/**
+ * Clear data from row 5 onwards in the Manufacturer Material Models Input Sheet
+ */
+function clearManufacturerMaterialModels(doAlert = true) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.NAMES);
+
+    if (!sheet) {
+        throw new Error(`${DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.NAMES} sheet not found.`);
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow >= 5) {
+        // Clear content and formatting from row 5 onwards
+        const numRows = lastRow - 5;
+        const numCols = sheet.getLastColumn();
+        sheet.getRange(5, 1, numRows, numCols).clearContent().clearFormat();
+
+        // Delete the cleared rows to keep sheet clean
+        sheet.deleteRows(6, numRows);
+
+        Logger.log(`Cleared ${numRows} rows from row 5 onwards`);
+        if (doAlert) {
+            SpreadsheetApp.getUi().alert(`Cleared ${numRows} rows successfully!`);
+        }
+    } else {
+        if (doAlert) {
+            SpreadsheetApp.getUi().alert("No data to clear!");
+        }
+    }
+}
+
+/**
+ * Setup Manufacturer Material Models Input Sheet
+ * Creates a utility sheet for maintaining manufacturer materials in a matrix format
+ */
+function setupManufacturerMaterialModelDataInputSheet() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheetName = DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.DATA;
+
+    // Delete existing sheet if it exists
+    let sheet = ss.getSheetByName(sheetName);
+    if (sheet) {
+        sheet.getDataRange().clearContent().clearFormat().clearDataValidations();
+        clearManufacturerMaterialModelData(false);
+    } else {
+        // Create new sheet
+        sheet = ss.insertSheet(sheetName);
+    }
+
+    // Set up title row (merged cells)
+    sheet.getRange(1, 1, 1, 5).merge();
+    sheet.getRange(1, 1)
+        .setValue("Maintain Manufacturer Materials Model Data")
+        .setFontSize(12)
+        .setFontWeight("bold")
+        .setHorizontalAlignment("center")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    sheet.getRange(1, 6).setValue("Create Buttons manually if you regenerated this sheet")
+
+    // Row 2: Manufacturer label and dropdown
+    sheet.getRange(2, 1)
+        .setValue("Manufacturer")
+        .setFontSize(10)
+        .setFontWeight("bold");
+
+    // Set up data validation for manufacturer dropdown
+    const manufacturersSheet = ss.getSheetByName(TABLE_METADATA.manufacturers.name);
+    if (manufacturersSheet) {
+        const lastRow = manufacturersSheet.getLastRow();
+        if (lastRow > 1) {
+            const nameColumnIndex = TABLE_META_INFO?.manufacturers?.columns?.name;
+            if (nameColumnIndex !== undefined) {
+                const range = manufacturersSheet.getRange(2, nameColumnIndex + 1, lastRow - 1, 1);
+                const rule = SpreadsheetApp.newDataValidation()
+                    .requireValueInRange(range, true)
+                    .setAllowInvalid(false)
+                    .build();
+                sheet.getRange(2, 2).setDataValidation(rule);
+            }
+        }
+    }
+
+    // Row 3: Create clickable checkbox buttons
+    // Clear any existing buttons in row 3
+    sheet.getRange(3, 1, 1, 11).clearContent().clearFormat();
+
+    // Create "Prepare" button using checkbox (cell 3,1)
+    sheet.getRange(3, 1)
+        .setValue("⚡ Prepare Data")
+        .setFontWeight("bold")
+        .setFontSize(10)
+        .setBackground("#34A853")
+        .setFontColor("#FFFFFF")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#2D7D3E", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+    // Insert checkbox in cell 3,2 for Prepare
+    const prepareCheckbox = sheet.getRange(3, 2);
+    prepareCheckbox
+        .insertCheckboxes()
+        .setBackground("#34A853")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#2D7D3E", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    prepareCheckbox.setNote("Check this box to prepare data");
+
+    // Create "Save" button using checkbox (cell 3,3)
+    sheet.getRange(3, 3)
+        .setValue("💾 Save Data")
+        .setFontWeight("bold")
+        .setFontSize(10)
+        .setBackground("#EA4335")
+        .setFontColor("#FFFFFF")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#C5341F", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+    // Insert checkbox in cell 3,4 for Save
+    const saveCheckbox = sheet.getRange(3, 4);
+    saveCheckbox
+        .insertCheckboxes()
+        .setBackground("#EA4335")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#C5341F", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    saveCheckbox.setNote("Check this box to save changes");
+
+    // Create "Clear" button using checkbox (cell 3,5)
+    sheet.getRange(3, 5)
+        .setValue("🗑️ Clear Data")
+        .setFontWeight("bold")
+        .setFontSize(10)
+        .setBackground("#FBBC04")
+        .setFontColor("#000000")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#F9AB00", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+
+    // Insert checkbox in cell 3,6 for Clear
+    const clearCheckbox = sheet.getRange(3, 6);
+    clearCheckbox.insertCheckboxes();
+    clearCheckbox
+        .setBackground("#FBBC04")
+        .setHorizontalAlignment("center")
+        .setVerticalAlignment("middle")
+        .setBorder(true, true, true, true, false, false, "#F9AB00", SpreadsheetApp.BorderStyle.SOLID_MEDIUM);
+    clearCheckbox.setNote("Check this box to clear all data below row 4");
+
+    // Set row height for better button appearance
+    sheet.setRowHeight(3, 35);
+
+    // Row 4: Column headers
+    sheet.getRange(4, 1)
+        .setValue("Lot Size")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    // Row 4: Column headers
+    sheet.getRange(4, 2)
+        .setValue("MRP")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    // Row 4: Column headers
+    sheet.getRange(4, 3)
+        .setValue("Material")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    // Row 4: Column headers
+    sheet.getRange(4, 4)
+        .setValue("Model")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    // Row 4: Column headers
+    sheet.getRange(4, 5)
+        .setValue("Unit")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    // Row 4: Column headers
+    sheet.getRange(4, 6)
+        .setValue("Currency")
+        .setFontSize(10)
+        .setFontWeight("bold")
+        .setBackground("#4285F4")
+        .setFontColor("#FFFFFF");
+
+    // Freeze rows and set column widths
+    sheet.setFrozenRows(4);
+    sheet.setColumnWidth(1, 200);
+
+    Logger.log("Manufacturer Material Data Input Sheet created successfully");
+    SpreadsheetApp.getUi().alert("Sheet created! Select a manufacturer and check the '⚡ Prepare Data' checkbox.");
+
+    return "Manufacturer Material Data Input Sheet created";
+}
+
+/**
+ * Clear data from row 5 onwards in the Manufacturer Material Model Data Input Sheet
+ */
+function clearManufacturerMaterialModelData(doAlert = true) {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.DATA);
+
+    if (!sheet) {
+        throw new Error(`${DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.DATA} sheet not found.`);
+    }
+
+    const lastRow = sheet.getLastRow();
+    if (lastRow >= 5) {
+        // Clear content and formatting from row 5 onwards
+        const numRows = lastRow - 5;
+        const numCols = sheet.getLastColumn();
+        sheet.getRange(5, 1, numRows, numCols).clearContent().clearFormat();
+
+        // Delete the cleared rows to keep sheet clean
+        sheet.deleteRows(6, numRows);
+
+        Logger.log(`Cleared ${numRows} rows from row 5 onwards`);
+        if (doAlert) {
+            SpreadsheetApp.getUi().alert(`Cleared ${numRows} rows successfully!`);
+        }
+    } else {
+        if (doAlert) {
+            SpreadsheetApp.getUi().alert("No data to clear!");
+        }
+    }
+}
+
+/**
+ * Prepare manufacturer material model data input data
+ * Populates the matrix with existing materials and models
+ */
+function prepareManufacturerMaterialModelData() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const sheet = ss.getSheetByName(DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.DATA);
+
+    if (!sheet) {
+        throw new Error(`${DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.DATA} sheet not found. Run setupManufacturerMaterialModelsInputSheet() first.`);
+    }
+
+    // Clear existing data (rows 5 onwards)
+    clearManufacturerMaterialModelData(false);
+    // Get selected manufacturer
+    const manufacturerName = sheet.getRange(2, 2).getValue();
+    if (!manufacturerName) {
+        SpreadsheetApp.getUi().alert("Please select a manufacturer first!");
+        return;
+    }
+
+    const manufacturers = readManufacturers();
+    const manufacturerId = manufacturers.nameMap[manufacturerName]?.uuid;
+    if (!manufacturerId) {
+        SpreadsheetApp.getUi().alert("Manufacturer not found!");
+        return;
+    }
+
+    const materials = readMaterials();
+
+    const manufacturerMaterials = readManufacturerMaterials(
+        manufacturers.uuidMap,
+        materials.uuidMap,
+        manufacturerId
+    );
+
+    const defaultCurrency = ss.getRangeByName(DEFAULT_CURRENCY_NAMED_RANGE).getValue() || "INR";
+
+    // Populate the matrix
+    for (let i = 0; i < manufacturerMaterials.list.length; i++) {
+        const mm = manufacturerMaterials.list[i];
+        const rowIndex = i + 5; // Start from row 5
+        sheet.getRange(rowIndex, 1).setValue(mm.selling_lot_size || 1);
+        sheet.getRange(rowIndex, 2).setValue(mm.max_retail_price || 1.0);
+        sheet.getRange(rowIndex, 3).setValue(mm.material?.name || "");
+        sheet.getRange(rowIndex, 4).setValue(mm.model || "");
+        sheet.getRange(rowIndex, 5).setValue(mm.material?.unit_of_measure || "");
+        sheet.getRange(rowIndex, 6).setValue(mm.currency || defaultCurrency);
+    }
+
+    Logger.log("Manufacturer material input data prepared successfully");
+    SpreadsheetApp.getUi().alert("Data prepared! Edit models as needed, then check the '💾 Save Data' checkbox.");
+}
+
+/**
+ * Maintain manufacturer material models
+ * Processes the matrix and updates the manufacturer_materials sheet
+ */
+function maintainManufacturerMaterialModelData() {
+    const ss = SpreadsheetApp.getActiveSpreadsheet();
+    const inputSheet = ss.getSheetByName(DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.DATA);
+    const mmSheet = ss.getSheetByName(TABLE_METADATA.manufacturer_materials.name);
+
+    if (!inputSheet) {
+        throw new Error(`${DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.DATA} sheet not found.`);
+    }
+
+    // Get selected manufacturer
+    const manufacturerName = inputSheet.getRange(2, 2).getValue();
+    if (!manufacturerName) {
+        SpreadsheetApp.getUi().alert("Please select a manufacturer first!");
+        return;
+    }
+
+    const manufacturers = readManufacturers();
+    const manufacturerId = manufacturers.nameMap[manufacturerName]?.uuid;
+    if (!manufacturerId) {
+        SpreadsheetApp.getUi().alert("Manufacturer not found!");
+        return;
+    }
+
+    const materials = readMaterials();
+
+    const manufacturerMaterials = readManufacturerMaterials(
+        manufacturers.uuidMap,
+        materials.uuidMap,
+        manufacturerId
+    );
+
+    // Process sheet data
+    const entries = [];
+    let invalidEntriesCount = 0;
+    const lastRow = inputSheet.getLastRow();
+    for (let r = 5; r <= lastRow; r++) {
+        // sheet.getRange(rowIndex, 1).setValue(mm.selling_lot_size || 1);
+        // sheet.getRange(rowIndex, 2).setValue(mm.max_retail_price || 1.0);
+        // sheet.getRange(rowIndex, 3).setValue(mm.material?.name || "");
+        // sheet.getRange(rowIndex, 4).setValue(mm.model || "");
+        // sheet.getRange(rowIndex, 5).setValue(mm.material?.unit_of_measure || "");
+        // sheet.getRange(rowIndex, 6).setValue(mm.currency || defaultCurrency);        
+        const materialName = inputSheet.getRange(r, 3).getValue();
+        const modelName = inputSheet.getRange(r, 4).getValue();
+        const materialId = materials.nameMap?.[materialName]?.uuid;
+        const oldRec = manufacturerMaterials.map?.[manufacturerId]?.[materialId]?.[modelName];
+        if (!(materialName && modelName && materialId && oldRec)) {
+            invalidEntriesCount++;
+            continue;
+        }
+        const rec = {
+            selling_lot_size: Number(inputSheet.getRange(r, 1).getValue()),
+            max_retail_price: Number(inputSheet.getRange(r, 2).getValue()),
+            currency: inputSheet.getRange(r, 6).getValue(),
+            uuid: oldRec.uuid,
+
+            manufacturer_id: manufacturerId,
+            material_id: materialId,
+            model: modelName,
+
+            material_name: materialName,
+            manufacturer_name: manufacturerName
+        }
+        entries.push(rec);
+    }
+
+    const currentTime = new Date();
+    if (entries.length > 0) {
+        Logger.log(`Upserting ${entries.length} records to ${TABLE_METADATA.manufacturer_materials.name}`);
+        const upserted = upsertRecords(TABLE_METADATA.manufacturer_materials.name, entries);
+        // Log changes
+        for (const record of entries) {
+            logChange(TABLE_METADATA.manufacturer_materials.name, record.uuid, CHANGE_MODE_UPDATE, currentTime);
+        }
+    }
+
+    // Apply formatting and resize
+    setupTable(TABLE_METADATA.manufacturer_materials.name, false);
+
+    SpreadsheetApp.getUi().alert(
+        `Maintenance complete!\nUpdated: ${entries.length}\nInvalid: ${invalidEntriesCount}`
+    );
+
+    return `Updated: ${entries.length}, Invalid: ${invalidEntriesCount}`;
+}
+
+/**
+ * Handle checkbox clicks on the utility sheet buttons
+ */
+function onEdit(e) {
+    try {
+        const range = e.range;
+        const sheet = range.getSheet();
+        const sheetName = sheet.getName();
+
+        if (sheetName === DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.NAMES) {
+            const row = range.getRow();
+            const col = range.getColumn();
+
+            // Check if "Prepare" checkbox (row 3, col 2) was checked
+            if (row === 3 && col === 2) {
+                const value = range.getValue();
+                if (value === true) {
+                    // Uncheck immediately
+                    range.setValue(false);
+                    // Call prepare function
+                    prepareManufacturerMaterialModels();
+                }
+            }
+            // Check if "Save" checkbox (row 3, col 4) was checked
+            else if (row === 3 && col === 4) {
+                const value = range.getValue();
+                if (value === true) {
+                    // Uncheck immediately
+                    range.setValue(false);
+                    // Call save function
+                    maintainManufacturerMaterialModels();
+                }
+            }
+            // Check if "Clear" checkbox (row 3, col 6) was checked
+            else if (row === 3 && col === 6) {
+                const value = range.getValue();
+                if (value === true) {
+                    // Uncheck immediately
+                    range.setValue(false);
+                    // Call clear function
+                    clearManufacturerMaterialModels();
+                }
+            }
+        } else if (sheetName === DATA_MAINTENANCE_SHEETS.MANUFACTURER_MATERIAL_MODELS.DATA) {
+            const row = range.getRow();
+            const col = range.getColumn();
+
+            // Check if "Prepare" checkbox (row 3, col 2) was checked
+            if (row === 3 && col === 2) {
+                const value = range.getValue();
+                if (value === true) {
+                    // Uncheck immediately
+                    range.setValue(false);
+                    // Call prepare function
+                    prepareManufacturerMaterialModelData();
+                }
+            }
+            // Check if "Save" checkbox (row 3, col 4) was checked
+            else if (row === 3 && col === 4) {
+                const value = range.getValue();
+                if (value === true) {
+                    // Uncheck immediately
+                    range.setValue(false);
+                    // Call save function
+                    maintainManufacturerMaterialModelData();
+                }
+            }
+            // Check if "Clear" checkbox (row 3, col 6) was checked
+            else if (row === 3 && col === 6) {
+                const value = range.getValue();
+                if (value === true) {
+                    // Uncheck immediately
+                    range.setValue(false);
+                    // Call clear function
+                    clearManufacturerMaterialModelData();
+                }
+            }
+        }
+    } catch (error) {
+        Logger.log("Error in onEdit: " + error.toString());
+        SpreadsheetApp.getUi().alert("Error: " + error.toString());
+    }
+}
