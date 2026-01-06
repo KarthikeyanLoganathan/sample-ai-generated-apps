@@ -1,0 +1,11 @@
+In Flutter app, is it possible to help user 
+- Keep a copy of the code *.js from [backend/](../backend/google-app-script-code/)
+  - .js renamed to .gs
+- to do google login
+- access google drive
+- create a Google Sheet (with user specified name in user interactively chosen folder)
+- get to the Google Apps Script
+  - push the code *.gs files to Apps Script Project 
+  - Deploy the Apps Script Web runtime
+  - Get Hold of the Web Runtime URL
+- Use it as information in login screen
