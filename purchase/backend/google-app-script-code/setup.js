@@ -25,7 +25,7 @@ const setup = {
 
     setupConfigSheet() {
         const ss = SpreadsheetApp.getActiveSpreadsheet();
-        // Create config sheet first
+        const execContext = utils.getExecutionContext();
         let configSheet = ss.getSheetByName(CONFIG_SHEET_NAME);
         if (!configSheet) {
             configSheet = ss.insertSheet(CONFIG_SHEET_NAME);
@@ -41,9 +41,11 @@ const setup = {
             .setFontColor("#FFFFFF")
             .setFontWeight("bold")
             .setHorizontalAlignment("center");
-        configSheet.autoResizeColumn(1);
-        configSheet.autoResizeColumn(2);
-        configSheet.autoResizeColumn(3);
+        if (execContext.isSheetsUI) {
+            configSheet.autoResizeColumn(1);
+            configSheet.autoResizeColumn(2);
+            configSheet.autoResizeColumn(3);
+        }
         configSheet.setFrozenRows(1);
 
         if (!config.getConfigValue("APP_CODE")) {
@@ -57,6 +59,7 @@ const setup = {
      * @param {string} tableName - Name of the table to setup
      */
     setupDataTableSheet(tableName, doLogging = true) {
+        const execContext = utils.getExecutionContext();
         const ss = SpreadsheetApp.getActiveSpreadsheet();
         const tableDef = tableDefinitions.getByName(tableName);
         if (!tableDef) {
@@ -177,9 +180,10 @@ const setup = {
             // Apply numeric formatting to existing data
             this.applyNumericFormatting(sheet, tableName);
 
-            // Optimize column widths
-            utils.autoResizeSheetColumns(sheet);
-
+            if (execContext.isSheetsUI) {
+                // Optimize column widths
+                utils.autoResizeSheetColumns(sheet);
+            }
             if (doLogging) {
                 Logger.log(`Sheet "${tableName}" updated successfully`);
             }
@@ -225,9 +229,10 @@ const setup = {
             // Apply numeric formatting (even on empty sheets for when data is added)
             this.applyNumericFormatting(sheet, tableName);
 
-            // Optimize column widths
-            utils.autoResizeSheetColumns(sheet);
-
+            if (execContext.isSheetsUI) {
+                // Optimize column widths
+                utils.autoResizeSheetColumns(sheet);
+            }
             if (doLogging) {
                 Logger.log(`Sheet "${tableName}" created successfully`);
             }
@@ -326,6 +331,7 @@ const setup = {
      * Setup statistics sheet showing row counts for all data tables
      */
     setupStatisticsSheet() {
+        const execContext = utils.getExecutionContext();
         const ss = SpreadsheetApp.getActiveSpreadsheet();
         const STATISTICS_SHEET_NAME = "statistics";
         let statsSheet = ss.getSheetByName(STATISTICS_SHEET_NAME);
@@ -372,9 +378,11 @@ const setup = {
             statsSheet.getRange(2, 1, numTables, 2).setValues(dataRows);
         }
 
-        // Auto-resize columns
-        statsSheet.autoResizeColumn(1);
-        statsSheet.autoResizeColumn(2);
+        if (execContext.isSheetsUI) {
+            // Auto-resize columns
+            statsSheet.autoResizeColumn(1);
+            statsSheet.autoResizeColumn(2);
+        }
 
         // Set column alignment
         if (numTables > 0) {
