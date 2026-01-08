@@ -38,7 +38,10 @@ class _ProjectsScreenState extends State<ProjectsScreen> {
     final webAppUrl = await _deltaSyncService.getWebAppUrl();
     final secretCode = await _deltaSyncService.getSecretCode();
     setState(() {
-      _isLoggedIn = webAppUrl != null && secretCode != null;
+      _isLoggedIn = webAppUrl != null &&
+          webAppUrl.isNotEmpty &&
+          secretCode != null &&
+          secretCode.isNotEmpty;
     });
   }
 

@@ -295,6 +295,8 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   if (value == 'toggle_sync_pause') {
                     await _loadSyncPauseState();
                   }
+                  // Refresh login status after any menu action
+                  await _checkLoginStatus();
                 },
               );
             },

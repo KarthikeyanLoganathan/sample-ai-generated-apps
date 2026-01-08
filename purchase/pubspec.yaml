@@ -24,6 +24,9 @@ dependencies:
   http: ^1.2.0
   shared_preferences: ^2.2.2
   logger: ^2.0.2+1
+  google_sign_in: ^6.2.1
+  googleapis: ^13.2.0
+  googleapis_auth: ^1.6.0
 
 dev_dependencies:
   flutter_test:

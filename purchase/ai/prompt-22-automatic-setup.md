@@ -2,7 +2,7 @@ For a gmail user, how to automate the setup of google sheet with google apps scr
 
 Earlier you gave this proposal [ai-docu/automation-proposal.md]
 
-In CommonOverFlowMenu, when user is not logged in, offer a menu option "Setup Google Sheets" as second item below "Login"
+In CommonOverFlowMenu, when user is not logged in, offer a menu option "Setup Google Sheets" as second item below "Login".  This "Setup Google Sheets" should not be visible when user is successfulled logged in
 
 Implemenet a screen SetupGoogleSheet.  
 - Implement Google Sign-in workflow.  

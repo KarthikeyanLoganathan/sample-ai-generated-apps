@@ -4,6 +4,7 @@ import '../utils/database_browser_helper.dart';
 import '../utils/app_helper.dart' as app_helper;
 import '../screens/settings_screen.dart';
 import '../screens/login_screen.dart';
+import '../screens/setup_google_sheet_screen.dart';
 
 /// Reusable overflow menu widget for common app-wide menu items
 ///
@@ -59,6 +60,19 @@ class CommonOverflowMenu extends StatelessWidget {
                 Icon(Icons.login, size: 20, color: Colors.green),
                 SizedBox(width: 12),
                 Text('Login'),
+              ],
+            ),
+          ),
+
+        // Setup Google Sheets (only show when not logged in)
+        if (!isLoggedIn)
+          const PopupMenuItem<String>(
+            value: 'setup_google_sheets',
+            child: Row(
+              children: [
+                Icon(Icons.cloud_upload, size: 20, color: Colors.blue),
+                SizedBox(width: 12),
+                Text('Setup Google Sheets'),
               ],
             ),
           ),
@@ -190,6 +204,16 @@ Future<bool> handleCommonMenuAction(
       final result = await Navigator.push(
         context,
         MaterialPageRoute(builder: (_) => const LoginScreen()),
+      );
+      if (result == true) {
+        onRefreshState();
+      }
+      return true;
+
+    case 'setup_google_sheets':
+      final result = await Navigator.push(
+        context,
+        MaterialPageRoute(builder: (_) => const SetupGoogleSheetScreen()),
       );
       if (result == true) {
         onRefreshState();
